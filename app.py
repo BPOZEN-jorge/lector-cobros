@@ -119,10 +119,35 @@ def cargar_cobros() -> pd.DataFrame:
         reg["fila"] = n
         filas.append(reg)
 
+    if not filas:
+        return pd.DataFrame(columns=list(COLUMNAS) + ["fila", "importe_num"])
     df = pd.DataFrame(filas)
     df["fecha"] = pd.to_datetime(df["fecha"], dayfirst=True, errors="coerce")
     df["importe_num"] = df["importe"].map(parsear_importe)
     return df.sort_values("fecha", ascending=False).reset_index(drop=True)
+
+
+def eliminar_cobro(reg) -> tuple[bool, str]:
+    """Pide al Apps Script (doPost) borrar la fila. Solo admin: usa [sheet].admin_token."""
+    cfg = st.secrets["sheet"]
+    token = cfg.get("admin_token")
+    if not token:
+        return False, "Falta configurar `admin_token` en la sección [sheet] de los secrets."
+    payload = {
+        "token": token,
+        "accion": "eliminar",
+        "fila": int(reg["fila"]),
+        "operador": reg["operador"],
+        "oportunidad": reg["oportunidad"],
+    }
+    try:
+        resp = requests.post(cfg["api_url"], json=payload, timeout=30)
+        data = resp.json()
+    except (requests.RequestException, ValueError):
+        return False, "No se pudo contactar la API o no devolvió JSON. ¿Publicaste la nueva versión del Apps Script?"
+    if data.get("ok"):
+        return True, data.get("mensaje", "Registro eliminado.")
+    return False, f"La API respondió: {data.get('error', 'error desconocido')}"
 
 
 # ==========================================
@@ -256,7 +281,16 @@ umbral = float(st.secrets["form"].get("umbral_alerta", 5000))
 
 st.title("💶 Mis cobros registrados" if not es_admin else "💶 Cobros registrados")
 
-tab_lista, tab_editar, tab_nuevo = st.tabs(["📋 Mis cobros", "✏️ Editar un cobro", "➕ Nuevo cobro"])
+pestanas = ["📋 Mis cobros", "✏️ Editar un cobro", "➕ Nuevo cobro"] + (["🗑️ Eliminar un cobro"] if es_admin else [])
+tab_lista, tab_editar, tab_nuevo, *tab_admin = st.tabs(pestanas)
+
+
+def etiqueta(i):
+    r = df.loc[i]
+    imp = f"{r['importe_num']:.2f} €" if pd.notna(r["importe_num"]) else "sin importe"
+    fecha = r["fecha"].strftime("%d/%m %H:%M") if pd.notna(r["fecha"]) else "—"
+    pref = f"{r['operador']} · " if es_admin else ""
+    return f"{pref}{r['oportunidad'] or 'sin oportunidad'} · {imp} · {r['tipo'] or 'sin tipo'} · {fecha}"
 
 # ------------------------------------------
 # TAB 1: LISTADO
@@ -316,14 +350,7 @@ with tab_editar:
     if df.empty:
         st.info("No hay cobros para editar.")
     else:
-        def etiqueta(i):
-            r = df.loc[i]
-            imp = f"{r['importe_num']:.2f} €" if pd.notna(r["importe_num"]) else "sin importe"
-            fecha = r["fecha"].strftime("%d/%m %H:%M") if pd.notna(r["fecha"]) else "—"
-            pref = f"{r['operador']} · " if es_admin else ""
-            return f"{pref}{r['oportunidad'] or 'sin oportunidad'} · {imp} · {r['tipo'] or 'sin tipo'} · {fecha}"
-
-        sel = st.selectbox("Selecciona el cobro a corregir", df.index, format_func=etiqueta)
+        sel =st.selectbox("Selecciona el cobro a corregir", df.index, format_func=etiqueta)
         reg = df.loc[sel]
 
         st.warning(
@@ -348,3 +375,45 @@ with tab_editar:
 with tab_nuevo:
     st.caption("El formulario se abre con tu nombre ya seleccionado.")
     mostrar_form({"operador": usuario} if not es_admin else None, key="refresh_nuevo")
+# ------------------------------------------
+# TAB 4: ELIMINAR (SOLO ADMIN)
+# ------------------------------------------
+if tab_admin:
+    with tab_admin[0]:
+        aviso = st.session_state.pop("aviso_eliminar", None)
+        if aviso:
+            st.success(aviso)
+
+        if df.empty:
+            st.info("No hay cobros para eliminar.")
+        else:
+            sel_del = st.selectbox("Selecciona el cobro a eliminar", df.index, format_func=etiqueta, key="sel_eliminar")
+            reg_del = df.loc[sel_del]
+            st.dataframe(
+                pd.DataFrame([{
+                    "Fecha": reg_del["fecha"].strftime("%d/%m/%Y %H:%M") if pd.notna(reg_del["fecha"]) else "—",
+                    "Operador": reg_del["operador"],
+                    "Id Oportunidad": reg_del["oportunidad"],
+                    "ID llamada": reg_del["llamada"],
+                    "Importe escrito": reg_del["importe"],
+                    "Tipo de deuda": reg_del["tipo"],
+                }]),
+                use_container_width=True, hide_index=True,
+            )
+            st.warning(
+                "Esta acción borra la fila de la hoja de respuestas. "
+                "Queda una copia en la pestaña **Eliminados** del Google Sheet."
+            )
+            confirmar = st.checkbox(
+                f"Confirmo eliminar el cobro de **{reg_del['operador']}** "
+                f"(oportunidad {reg_del['oportunidad'] or 'sin oportunidad'}).",
+                key=f"confirmar_eliminar_{reg_del['fila']}",
+            )
+            if st.button("🗑️ Eliminar registro", type="primary", disabled=not confirmar, use_container_width=True):
+                ok, msg = eliminar_cobro(reg_del)
+                if ok:
+                    st.session_state.aviso_eliminar = f"✅ {msg}"
+                    cargar_cobros.clear()
+                    st.rerun()
+                else:
+                    st.error(f"❌ {msg}")
