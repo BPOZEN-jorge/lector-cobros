@@ -6,10 +6,12 @@ Portal "Mis Cobros" — Streamlit
 - Cada operador ve SOLO sus cobros (leídos del Google Sheet del form).
 - Editar = reenviar el Google Form prellenado con el mismo operador y
   oportunidad; el Apps Script de deduplicación sobrescribe la fila.
-- Vista administrador: ve todos los operadores.
+- Vista administrador: ve todos los operadores y puede eliminar registros.
 """
 import hmac
+import html
 import ipaddress
+import json
 import re
 import urllib.parse
 from datetime import datetime
@@ -128,13 +130,10 @@ def cargar_cobros() -> pd.DataFrame:
 
 
 def eliminar_cobro(reg) -> tuple[bool, str]:
-    """Pide al Apps Script (doPost) borrar la fila. Solo admin: usa [sheet].admin_token."""
+    """Pide al Apps Script (doPost) borrar la fila, con el mismo api_token de lectura."""
     cfg = st.secrets["sheet"]
-    token = cfg.get("admin_token")
-    if not token:
-        return False, "Falta configurar `admin_token` en la sección [sheet] de los secrets."
     payload = {
-        "token": token,
+        "token": cfg["api_token"],
         "accion": "eliminar",
         "fila": int(reg["fila"]),
         "operador": reg["operador"],
@@ -168,13 +167,48 @@ def url_form(prefill: dict | None = None, embebido: bool = False) -> str:
     return base + ("?" + urllib.parse.urlencode(params) if params else "")
 
 
+def iframe_form_autoreinicio(src: str, alto: int):
+    """
+    Embebe el Google Form y, cuando se envía, lo vuelve a cargar solo para registrar otro.
+    El form es de una sola página: la 1ª carga del iframe es el formulario y la 2ª es
+    "Se registró tu respuesta". En esa 2ª carga se muestra un aviso y se reinicia el src.
+    """
+    components.html(
+        f"""
+<div id="aviso" style="display:none;font-family:sans-serif;font-size:15px;padding:10px 14px;
+     margin-bottom:8px;border-radius:8px;background:#e6f4ea;color:#1e4620;border:1px solid #9fd3ad;">
+  ✅ <b>Respuesta enviada.</b> El formulario se reinicia para que registres otro cobro…
+</div>
+<iframe id="form" src="{html.escape(src, quote=True)}" width="100%" height="{alto}"
+        frameborder="0" style="border:0"></iframe>
+<script>
+  const form = document.getElementById("form");
+  const aviso = document.getElementById("aviso");
+  const SRC = {json.dumps(src)};
+  let cargas = 0;
+  form.addEventListener("load", () => {{
+    cargas += 1;
+    if (cargas < 2) return;  // 1ª carga: formulario vacío / prellenado
+    aviso.style.display = "block";  // 2ª carga: confirmación de envío
+    setTimeout(() => {{
+      cargas = 0;
+      form.src = SRC;
+      setTimeout(() => {{ aviso.style.display = "none"; }}, 4000);
+    }}, 2500);
+  }});
+</script>
+""",
+        height=alto + 70,
+    )
+
+
 def mostrar_form(prefill: dict | None, key: str):
     st.link_button(
         "↗️ Abrir el formulario en una pestaña nueva",
         url_form(prefill),
         use_container_width=True,
     )
-    components.iframe(url_form(prefill, embebido=True), height=1150, scrolling=True)
+    iframe_form_autoreinicio(url_form(prefill, embebido=True), alto=1150)
     if st.button("🔄 Ya envié el formulario: actualizar mis datos", key=key, type="primary"):
         cargar_cobros.clear()
         st.rerun()
