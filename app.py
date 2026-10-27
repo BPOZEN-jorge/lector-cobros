@@ -4,7 +4,7 @@ Portal "Mis Cobros" — Streamlit
 - Bloqueo por IP (misma lógica que el Portal de Capacitación).
 - Login por operador con contraseña individual en secrets.toml.
 - Cada operador ve SOLO sus cobros (leídos del Google Sheet del form).
-- Editar = reenviar el Google Form prellenado con la misma factura y
+- Editar = reenviar el Google Form prellenado con el mismo operador y
   oportunidad; el Apps Script de deduplicación sobrescribe la fila.
 - Vista administrador: ve todos los operadores.
 """
@@ -35,7 +35,6 @@ COLUMNAS = {
     "fecha": "Marca temporal",
     "operador": "Operador",
     "oportunidad": "Id Oportunidad",
-    "factura": "Número de factura",
     "llamada": "ID de la llamada",
     "importe": "Importe cobrado",
     "tipo": "Tipos de deuda",
@@ -44,6 +43,11 @@ COLUMNAS = {
 
 def ahora_col() -> datetime:
     return datetime.now(TZ)
+
+
+def normalizar(txt) -> str:
+    """Compara nombres sin importar mayúsculas ni espacios de más."""
+    return " ".join(str(txt or "").split()).casefold()
 
 
 # ==========================================
@@ -99,18 +103,18 @@ def cargar_cobros() -> pd.DataFrame:
     if len(valores) < 2:
         return pd.DataFrame(columns=list(COLUMNAS) + ["fila", "importe_num"])
 
-    encabezados = [h.strip().lower() for h in valores[0]]
+    encabezados = [normalizar(h) for h in valores[0]]
     idx = {}
     for clave, nombre in COLUMNAS.items():
-        if nombre.lower() not in encabezados:
+        if normalizar(nombre) not in encabezados:
             raise KeyError(f'No se encontró la columna "{nombre}" en la hoja.')
-        idx[clave] = encabezados.index(nombre.lower())
+        idx[clave] = encabezados.index(normalizar(nombre))
 
     filas = []
     for n, fila in enumerate(valores[1:], start=2):
         fila = fila + [""] * (len(encabezados) - len(fila))
-        reg = {k: fila[j].strip() for k, j in idx.items()}
-        if not reg["factura"]:
+        reg = {k: str(fila[j]).strip() for k, j in idx.items()}
+        if not reg["operador"] and not reg["oportunidad"]:
             continue
         reg["fila"] = n
         filas.append(reg)
@@ -246,7 +250,7 @@ if es_admin:
     ver = st.sidebar.selectbox("Ver operador", opciones)
     df = df_total if ver == TODOS else df_total[df_total["operador"] == ver]
 else:
-    df = df_total[df_total["operador"] == usuario]
+    df = df_total[df_total["operador"].map(normalizar) == normalizar(usuario)]
 
 umbral = float(st.secrets["form"].get("umbral_alerta", 5000))
 
@@ -277,7 +281,7 @@ with tab_lista:
         hoy = ahora_col().date()
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total cobrado", f"{vista['importe_num'].sum():,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
-        m2.metric("Facturas", len(vista))
+        m2.metric("Cobros", len(vista))
         m3.metric("Cobrado hoy", f"{vista.loc[vista['fecha'].dt.date == hoy, 'importe_num'].sum():,.2f} €"
                   .replace(",", "X").replace(".", ",").replace("X", "."))
         alertas = vista["importe_num"].isna() | (vista["importe_num"] > umbral)
@@ -287,7 +291,6 @@ with tab_lista:
         tabla = pd.DataFrame({
             "Fecha": vista["fecha"].dt.strftime("%d/%m/%Y %H:%M"),
             **({"Operador": vista["operador"]} if es_admin else {}),
-            "Factura": vista["factura"],
             "Id Oportunidad": vista["oportunidad"],
             "ID llamada": vista["llamada"],
             "Importe (€)": vista["importe_num"],
@@ -318,20 +321,19 @@ with tab_editar:
             imp = f"{r['importe_num']:.2f} €" if pd.notna(r["importe_num"]) else "sin importe"
             fecha = r["fecha"].strftime("%d/%m %H:%M") if pd.notna(r["fecha"]) else "—"
             pref = f"{r['operador']} · " if es_admin else ""
-            return f"{pref}{r['factura']} · {imp} · {r['tipo'] or 'sin tipo'} · {fecha}"
+            return f"{pref}{r['oportunidad'] or 'sin oportunidad'} · {imp} · {r['tipo'] or 'sin tipo'} · {fecha}"
 
         sel = st.selectbox("Selecciona el cobro a corregir", df.index, format_func=etiqueta)
         reg = df.loc[sel]
 
         st.warning(
-            "**No cambies el Número de factura ni el Id Oportunidad.** "
+            "**No cambies el Operador ni el Id Oportunidad.** "
             "Con esos dos datos el sistema reconoce el registro y lo reemplaza. "
             "Si los cambias, se crea un cobro nuevo duplicado."
         )
         mostrar_form(
             {
                 "operador": reg["operador"],
-                "factura": reg["factura"],
                 "oportunidad": reg["oportunidad"],
                 "llamada": reg["llamada"],
                 "importe": reg["importe"],
