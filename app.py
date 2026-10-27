@@ -177,7 +177,7 @@ def iframe_form_autoreinicio(src: str, alto: int):
         f"""
 <div id="aviso" style="display:none;font-family:sans-serif;font-size:15px;padding:10px 14px;
      margin-bottom:8px;border-radius:8px;background:#e6f4ea;color:#1e4620;border:1px solid #9fd3ad;">
-  ✅ <b>Respuesta enviada.</b> El formulario se reinicia para que registres otro cobro…
+  ✅ <b>Respuesta enviada.</b> El formulario ya está listo para registrar otro cobro.
 </div>
 <iframe id="form" src="{html.escape(src, quote=True)}" width="100%" height="{alto}"
         frameborder="0" style="border:0"></iframe>
@@ -186,15 +186,16 @@ def iframe_form_autoreinicio(src: str, alto: int):
   const aviso = document.getElementById("aviso");
   const SRC = {json.dumps(src)};
   let cargas = 0;
+  let ocultar = null;
   form.addEventListener("load", () => {{
     cargas += 1;
     if (cargas < 2) return;  // 1ª carga: formulario vacío / prellenado
-    aviso.style.display = "block";  // 2ª carga: confirmación de envío
-    setTimeout(() => {{
-      cargas = 0;
-      form.src = SRC;
-      setTimeout(() => {{ aviso.style.display = "none"; }}, 4000);
-    }}, 2500);
+    // 2ª carga = confirmación de envío: reinicio inmediato y aviso por unos segundos
+    cargas = 0;
+    form.src = SRC;
+    aviso.style.display = "block";
+    clearTimeout(ocultar);
+    ocultar = setTimeout(() => {{ aviso.style.display = "none"; }}, 5000);
   }});
 </script>
 """,
