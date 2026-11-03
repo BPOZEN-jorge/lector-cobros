@@ -1,7 +1,6 @@
 """
 Portal "Mis Cobros" — Streamlit
 --------------------------------------------------------------
-- Bloqueo por IP (misma lógica que el Portal de Capacitación).
 - Login por operador con contraseña individual en secrets.toml.
 - Cada operador ve SOLO sus cobros (leídos del Google Sheet del form).
 - Editar = reenviar el Google Form prellenado con el mismo operador y
@@ -10,7 +9,6 @@ Portal "Mis Cobros" — Streamlit
 """
 import hmac
 import html
-import ipaddress
 import json
 import re
 import urllib.parse
@@ -21,7 +19,6 @@ import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from streamlit_javascript import st_javascript
 
 # ==========================================
 # CONFIGURACIÓN
@@ -50,25 +47,6 @@ def ahora_col() -> datetime:
 def normalizar(txt) -> str:
     """Compara nombres sin importar mayúsculas ni espacios de más."""
     return " ".join(str(txt or "").split()).casefold()
-
-
-# ==========================================
-# VALIDACIÓN DE IP (igual que el otro portal)
-# ==========================================
-def obtener_ip_cliente_javascript():
-    js_code = "await fetch('https://api.ipify.org?format=json').then(r => r.json()).then(d => d.ip)"
-    return st_javascript(js_code)
-
-
-def validar_ip(ip_usuario: str) -> bool:
-    if not ip_usuario or not isinstance(ip_usuario, str):
-        return False
-    rangos = st.secrets.get("network", {}).get("ips_permitidas", ["127.0.0.1"])
-    try:
-        ip_obj = ipaddress.ip_address(ip_usuario.strip())
-        return any(ip_obj in ipaddress.ip_network(r, strict=False) for r in rangos)
-    except ValueError:
-        return False
 
 
 # ==========================================
@@ -228,28 +206,10 @@ for k, v in {"autenticado": False, "usuario": None, "es_admin": False, "intentos
     st.session_state.setdefault(k, v)
 
 # ==========================================
-# CORTAFUEGOS POR IP
-# ==========================================
-ip_detectada = obtener_ip_cliente_javascript()
-if ip_detectada is None or ip_detectada == 0:
-    st.info("⏳ Validando conexión con la red corporativa...")
-    st.stop()
-
-if not validar_ip(str(ip_detectada)):
-    st.error("🚫 **ACCESO NO AUTORIZADO**")
-    st.warning(
-        f"No puedes ingresar a este portal desde tu red actual.\n\n"
-        f"**IP detectada:** `{ip_detectada}`\n\n"
-        f"La plataforma solo está disponible desde la red corporativa autorizada."
-    )
-    st.stop()
-
-# ==========================================
 # LOGIN
 # ==========================================
 if not st.session_state.autenticado:
     st.title("💶 Mis Cobros")
-    st.caption(f"🌐 IP autorizada: `{ip_detectada}`")
 
     if st.session_state.intentos >= MAX_INTENTOS:
         st.error("🔒 Demasiados intentos fallidos. Cierra el navegador y vuelve a intentarlo más tarde.")
@@ -289,7 +249,6 @@ es_admin = st.session_state.es_admin
 with st.sidebar:
     st.title("💶 Mis Cobros")
     st.success(f"👤 **{usuario}**" + (" (admin)" if es_admin else ""))
-    st.caption(f"🌐 IP: `{ip_detectada}`")
     if st.button("🔄 Actualizar datos", use_container_width=True):
         cargar_cobros.clear()
         st.rerun()
@@ -385,7 +344,7 @@ with tab_editar:
     if df.empty:
         st.info("No hay cobros para editar.")
     else:
-        sel =st.selectbox("Selecciona el cobro a corregir", df.index, format_func=etiqueta)
+        sel = st.selectbox("Selecciona el cobro a corregir", df.index, format_func=etiqueta)
         reg = df.loc[sel]
 
         st.warning(
@@ -410,6 +369,7 @@ with tab_editar:
 with tab_nuevo:
     st.caption("El formulario se abre con tu nombre ya seleccionado.")
     mostrar_form({"operador": usuario} if not es_admin else None, key="refresh_nuevo")
+
 # ------------------------------------------
 # TAB 4: ELIMINAR (SOLO ADMIN)
 # ------------------------------------------
