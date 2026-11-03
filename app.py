@@ -21,6 +21,7 @@ import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_javascript import st_javascript
 
 # ==========================================
 # CONFIGURACIÓN
@@ -52,35 +53,11 @@ def normalizar(txt) -> str:
 
 
 # ==========================================
-# VALIDACIÓN DE IP
+# VALIDACIÓN DE IP (igual que el otro portal)
 # ==========================================
-def _ips_desde_headers(headers) -> list[str]:
-    """IPs válidas de X-Forwarded-For (cliente primero) y X-Real-Ip, sin repetir."""
-    crudas = []
-    for nombre in ("X-Forwarded-For", "X-Real-Ip"):
-        valor = headers.get(nombre) or headers.get(nombre.lower()) or ""
-        crudas += [p.strip() for p in str(valor).split(",")]
-    ips = []
-    for ip in crudas:
-        try:
-            ipaddress.ip_address(ip)
-        except ValueError:
-            continue
-        if ip not in ips:
-            ips.append(ip)
-    return ips
-
-
-def obtener_ips_cliente() -> list[str]:
-    """
-    IP del usuario detectada en el SERVIDOR (cabeceras de la conexión), sin componentes de
-    JavaScript: antes se usaba streamlit_javascript + ipify, que fallaba al cargar en algunas redes.
-    """
-    ips = _ips_desde_headers(st.context.headers)
-    ip_conexion = getattr(st.context, "ip_address", None)  # Streamlit >= 1.45
-    if ip_conexion and ip_conexion not in ips:
-        ips.append(ip_conexion)
-    return ips
+def obtener_ip_cliente_javascript():
+    js_code = "await fetch('https://api.ipify.org?format=json').then(r => r.json()).then(d => d.ip)"
+    return st_javascript(js_code)
 
 
 def validar_ip(ip_usuario: str) -> bool:
@@ -253,14 +230,16 @@ for k, v in {"autenticado": False, "usuario": None, "es_admin": False, "intentos
 # ==========================================
 # CORTAFUEGOS POR IP
 # ==========================================
-ips_cliente = obtener_ips_cliente()
-ip_detectada = next((ip for ip in ips_cliente if validar_ip(ip)), None)
+ip_detectada = obtener_ip_cliente_javascript()
+if ip_detectada is None or ip_detectada == 0:
+    st.info("⏳ Validando conexión con la red corporativa...")
+    st.stop()
 
-if not ip_detectada:
+if not validar_ip(str(ip_detectada)):
     st.error("🚫 **ACCESO NO AUTORIZADO**")
     st.warning(
         f"No puedes ingresar a este portal desde tu red actual.\n\n"
-        f"**IP detectada:** `{', '.join(ips_cliente) or 'no disponible'}`\n\n"
+        f"**IP detectada:** `{ip_detectada}`\n\n"
         f"La plataforma solo está disponible desde la red corporativa autorizada."
     )
     st.stop()
