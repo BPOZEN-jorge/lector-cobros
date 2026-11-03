@@ -1,4 +1,3 @@
-streamlit>=1.37
+streamlit>=1.45
 pandas
 requests
-streamlit-javascript
