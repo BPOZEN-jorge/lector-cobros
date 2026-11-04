@@ -54,7 +54,15 @@ def normalizar(txt) -> str:
 # ==========================================
 # VALIDACIÓN DE IP PÚBLICA (igual que el otro portal, sin streamlit_javascript)
 # ==========================================
-COOKIE_IP = "mis_cobros_ip_publica"
+CAMPO_IP = "ip_publica_navegador"  # campo de texto oculto por donde el navegador entrega su IP pública
+CSS_CAMPO_IP = f"""
+<style>
+.st-key-{CAMPO_IP},
+div[data-testid="stTextInput"]:has(input[aria-label="{CAMPO_IP}"]) {{
+  position: absolute !important; left: -10000px !important; width: 1px; height: 1px; overflow: hidden;
+}}
+</style>
+"""
 
 
 def validar_ip(ip_usuario: str) -> bool:
@@ -68,10 +76,10 @@ def validar_ip(ip_usuario: str) -> bool:
         return False
 
 
-def sincronizar_ip_publica(ip_guardada: str):
+def detectar_ip_publica():
     """
-    El NAVEGADOR consulta su IP pública en ipify (como antes) y la deja en una cookie de esta página;
-    si es nueva o cambió, recarga una vez para que Python la lea con st.context.cookies.
+    El NAVEGADOR consulta su IP pública en ipify (como antes) y la escribe en el campo oculto CAMPO_IP:
+    llega a Python como el valor de un st.text_input normal (sin cookies ni recargas).
     Usa components.html (el mismo tipo de iframe del formulario), no el componente streamlit_javascript,
     que en algunas redes no cargaba ("No se pudo obtener el módulo importado dinámicamente").
     """
@@ -80,23 +88,25 @@ def sincronizar_ip_publica(ip_guardada: str):
 <script>
 (async () => {{
   const app = window.parent;               // documento de la app (mismo origen)
-  const guardada = {json.dumps(ip_guardada or "")};
   let ip = "";
   try {{
     const r = await fetch("https://api.ipify.org?format=json", {{cache: "no-store"}});
     ip = (await r.json()).ip || "";
-  }} catch (e) {{ return; }}
-  if (!ip) return;
-  if (ip === guardada) {{ app.sessionStorage.removeItem("{COOKIE_IP}_recargas"); return; }}
-  const segura = app.location.protocol === "https:" ? "; Secure" : "";
-  app.document.cookie = "{COOKIE_IP}=" + encodeURIComponent(ip) + "; path=/; max-age=43200; SameSite=Lax" + segura;
-  // Evita recargas infinitas si el navegador bloquea cookies
-  const n = Number(app.sessionStorage.getItem("{COOKIE_IP}_recargas") || 0);
-  if (n >= 2) return;
-  app.sessionStorage.setItem("{COOKIE_IP}_recargas", String(n + 1));
-  const s = app.document.createElement("script");
-  s.textContent = "window.location.reload()";
-  app.document.body.appendChild(s);
+  }} catch (e) {{}}
+  ip = ip || "ERROR";
+  for (let i = 0; i < 100; i++) {{
+    const campo = app.document.querySelector('input[aria-label="{CAMPO_IP}"]');
+    if (campo) {{
+      const setter = Object.getOwnPropertyDescriptor(app.HTMLInputElement.prototype, "value").set;
+      campo.focus();
+      setter.call(campo, ip);
+      campo.dispatchEvent(new app.Event("input", {{bubbles: true}}));
+      campo.dispatchEvent(new app.KeyboardEvent("keydown", {{key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true}}));
+      campo.blur();
+      return;
+    }}
+    await new Promise(r => setTimeout(r, 100));
+  }}
 }})();
 </script>
 """,
@@ -263,11 +273,19 @@ for k, v in {"autenticado": False, "usuario": None, "es_admin": False, "intentos
 # ==========================================
 # CORTAFUEGOS POR IP PÚBLICA
 # ==========================================
-ip_detectada = st.context.cookies.get(COOKIE_IP, "")
-sincronizar_ip_publica(ip_detectada)  # actualiza la cookie si la IP cambió (p. ej. otra red)
+st.markdown(CSS_CAMPO_IP, unsafe_allow_html=True)
+ip_detectada = st.text_input(CAMPO_IP, key=CAMPO_IP, label_visibility="collapsed").strip()
 
 if not ip_detectada:
-    st.info("⏳ Validando conexión con la red corporativa... Si no avanza en unos segundos, recarga la página.")
+    detectar_ip_publica()
+    st.info("⏳ Validando conexión con la red corporativa...")
+    st.stop()
+
+if ip_detectada == "ERROR":
+    st.error(
+        "⚠️ No se pudo consultar tu IP pública (api.ipify.org). Revisa tu conexión o que la red no "
+        "bloquee ese sitio y recarga la página."
+    )
     st.stop()
 
 if not validar_ip(ip_detectada):
