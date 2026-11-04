@@ -1,6 +1,7 @@
 """
 Portal "Mis Cobros" — Streamlit
 --------------------------------------------------------------
+- Bloqueo por IP pública del navegador (misma lógica que el Portal de Capacitación).
 - Login por operador con contraseña individual en secrets.toml.
 - Cada operador ve SOLO sus cobros (leídos del Google Sheet del form).
 - Editar = reenviar el Google Form prellenado con el mismo operador y
@@ -9,6 +10,7 @@ Portal "Mis Cobros" — Streamlit
 """
 import hmac
 import html
+import ipaddress
 import json
 import re
 import urllib.parse
@@ -47,6 +49,59 @@ def ahora_col() -> datetime:
 def normalizar(txt) -> str:
     """Compara nombres sin importar mayúsculas ni espacios de más."""
     return " ".join(str(txt or "").split()).casefold()
+
+
+# ==========================================
+# VALIDACIÓN DE IP PÚBLICA (igual que el otro portal, sin streamlit_javascript)
+# ==========================================
+COOKIE_IP = "mis_cobros_ip_publica"
+
+
+def validar_ip(ip_usuario: str) -> bool:
+    if not ip_usuario or not isinstance(ip_usuario, str):
+        return False
+    rangos = st.secrets.get("network", {}).get("ips_permitidas", ["127.0.0.1"])
+    try:
+        ip_obj = ipaddress.ip_address(ip_usuario.strip())
+        return any(ip_obj in ipaddress.ip_network(r, strict=False) for r in rangos)
+    except ValueError:
+        return False
+
+
+def sincronizar_ip_publica(ip_guardada: str):
+    """
+    El NAVEGADOR consulta su IP pública en ipify (como antes) y la deja en una cookie de esta página;
+    si es nueva o cambió, recarga una vez para que Python la lea con st.context.cookies.
+    Usa components.html (el mismo tipo de iframe del formulario), no el componente streamlit_javascript,
+    que en algunas redes no cargaba ("No se pudo obtener el módulo importado dinámicamente").
+    """
+    components.html(
+        f"""
+<script>
+(async () => {{
+  const app = window.parent;               // documento de la app (mismo origen)
+  const guardada = {json.dumps(ip_guardada or "")};
+  let ip = "";
+  try {{
+    const r = await fetch("https://api.ipify.org?format=json", {{cache: "no-store"}});
+    ip = (await r.json()).ip || "";
+  }} catch (e) {{ return; }}
+  if (!ip) return;
+  if (ip === guardada) {{ app.sessionStorage.removeItem("{COOKIE_IP}_recargas"); return; }}
+  const segura = app.location.protocol === "https:" ? "; Secure" : "";
+  app.document.cookie = "{COOKIE_IP}=" + encodeURIComponent(ip) + "; path=/; max-age=43200; SameSite=Lax" + segura;
+  // Evita recargas infinitas si el navegador bloquea cookies
+  const n = Number(app.sessionStorage.getItem("{COOKIE_IP}_recargas") || 0);
+  if (n >= 2) return;
+  app.sessionStorage.setItem("{COOKIE_IP}_recargas", String(n + 1));
+  const s = app.document.createElement("script");
+  s.textContent = "window.location.reload()";
+  app.document.body.appendChild(s);
+}})();
+</script>
+""",
+        height=0,
+    )
 
 
 # ==========================================
@@ -206,10 +261,30 @@ for k, v in {"autenticado": False, "usuario": None, "es_admin": False, "intentos
     st.session_state.setdefault(k, v)
 
 # ==========================================
+# CORTAFUEGOS POR IP PÚBLICA
+# ==========================================
+ip_detectada = st.context.cookies.get(COOKIE_IP, "")
+sincronizar_ip_publica(ip_detectada)  # actualiza la cookie si la IP cambió (p. ej. otra red)
+
+if not ip_detectada:
+    st.info("⏳ Validando conexión con la red corporativa... Si no avanza en unos segundos, recarga la página.")
+    st.stop()
+
+if not validar_ip(ip_detectada):
+    st.error("🚫 **ACCESO NO AUTORIZADO**")
+    st.warning(
+        f"No puedes ingresar a este portal desde tu red actual.\n\n"
+        f"**IP detectada:** `{ip_detectada}`\n\n"
+        f"La plataforma solo está disponible desde la red corporativa autorizada."
+    )
+    st.stop()
+
+# ==========================================
 # LOGIN
 # ==========================================
 if not st.session_state.autenticado:
     st.title("💶 Mis Cobros")
+    st.caption(f"🌐 IP autorizada: `{ip_detectada}`")
 
     if st.session_state.intentos >= MAX_INTENTOS:
         st.error("🔒 Demasiados intentos fallidos. Cierra el navegador y vuelve a intentarlo más tarde.")
@@ -249,6 +324,7 @@ es_admin = st.session_state.es_admin
 with st.sidebar:
     st.title("💶 Mis Cobros")
     st.success(f"👤 **{usuario}**" + (" (admin)" if es_admin else ""))
+    st.caption(f"🌐 IP: `{ip_detectada}`")
     if st.button("🔄 Actualizar datos", use_container_width=True):
         cargar_cobros.clear()
         st.rerun()
