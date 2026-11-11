@@ -1,0 +1,6 @@
+[server]
+# Tiempo (segundos) que Streamlit conserva la sesión (login, filtros) cuando el navegador
+# pierde la conexión: equipo suspendido, Wi-Fi inestable, pestaña en segundo plano.
+# Por defecto son 120 s; pasado ese tiempo el usuario vuelve a la pantalla de login.
+# 28800 s = 8 horas (una jornada). Recargar la página (F5) siempre inicia una sesión nueva.
+disconnectedSessionTTL = 28800
