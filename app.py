@@ -32,6 +32,11 @@ TODOS = "(Todos los operadores)"
 MAX_INTENTOS = 5
 
 # Encabezados EXACTOS de la hoja de respuestas (se buscan por nombre, no por letra)
+# Opcionales: si la hoja aún no las tiene, la app funciona igual (quedan vacías)
+COLUMNAS_OPCIONALES = {
+    "fecha_cobro": "Fecha del cobro",   # Pregunta tipo Fecha del formulario (día en que se cobró)
+}
+
 COLUMNAS = {
     "fecha": "Marca temporal",
     "operador": "Operador",
@@ -146,7 +151,7 @@ def cargar_cobros() -> pd.DataFrame:
 
     valores = data.get("valores", [])
     if len(valores) < 2:
-        return pd.DataFrame(columns=list(COLUMNAS) + ["fila", "importe_num"])
+        return pd.DataFrame(columns=list(COLUMNAS) + list(COLUMNAS_OPCIONALES) + ["fila", "importe_num"])
 
     encabezados = [normalizar(h) for h in valores[0]]
     idx = {}
@@ -154,20 +159,26 @@ def cargar_cobros() -> pd.DataFrame:
         if normalizar(nombre) not in encabezados:
             raise KeyError(f'No se encontró la columna "{nombre}" en la hoja.')
         idx[clave] = encabezados.index(normalizar(nombre))
+    for clave, nombre in COLUMNAS_OPCIONALES.items():
+        if normalizar(nombre) in encabezados:
+            idx[clave] = encabezados.index(normalizar(nombre))
 
     filas = []
     for n, fila in enumerate(valores[1:], start=2):
         fila = fila + [""] * (len(encabezados) - len(fila))
         reg = {k: str(fila[j]).strip() for k, j in idx.items()}
+        for clave in COLUMNAS_OPCIONALES:
+            reg.setdefault(clave, "")
         if not reg["operador"] and not reg["oportunidad"]:
             continue
         reg["fila"] = n
         filas.append(reg)
 
     if not filas:
-        return pd.DataFrame(columns=list(COLUMNAS) + ["fila", "importe_num"])
+        return pd.DataFrame(columns=list(COLUMNAS) + list(COLUMNAS_OPCIONALES) + ["fila", "importe_num"])
     df = pd.DataFrame(filas)
     df["fecha"] = pd.to_datetime(df["fecha"], dayfirst=True, errors="coerce")
+    df["fecha_cobro"] = pd.to_datetime(df["fecha_cobro"], dayfirst=True, errors="coerce").dt.normalize()
     df["importe_num"] = df["importe"].map(parsear_importe)
     return df.sort_values("fecha", ascending=False).reset_index(drop=True)
 
@@ -387,16 +398,26 @@ with tab_lista:
     if df.empty:
         st.info("Aún no tienes cobros registrados.")
     else:
+        hay_fecha_cobro = df["fecha_cobro"].notna().any()
+        col_fecha = "fecha"
+        if hay_fecha_cobro:
+            filtrar_por = st.radio("Filtrar por:", ["Fecha de registro", "Fecha del cobro"], horizontal=True,
+                                   help="Fecha de registro = Marca temporal del formulario. "
+                                        "Fecha del cobro = el día que se cobró (los registros sin esa fecha no se muestran).")
+            col_fecha = "fecha_cobro" if filtrar_por == "Fecha del cobro" else "fecha"
         c1, c2 = st.columns(2)
-        fechas_validas = df["fecha"].dropna()
+        fechas_validas = df[col_fecha].dropna()
+        if fechas_validas.empty:
+            fechas_validas = pd.Series([pd.Timestamp(ahora_col().date())])
         f_min, f_max = fechas_validas.min().date(), fechas_validas.max().date()
-        rango = c1.date_input("Rango de fechas", (f_min, f_max), min_value=f_min, max_value=f_max)
+        rango = c1.date_input("Rango de fechas", (f_min, f_max), min_value=f_min, max_value=f_max,
+                              key=f"rango_{col_fecha}")
         tipos = sorted(t for t in df["tipo"].unique() if t)
         tipos_sel = c2.multiselect("Tipo de deuda", tipos, default=tipos)
 
         vista = df.copy()
         if isinstance(rango, tuple) and len(rango) == 2:
-            vista = vista[(vista["fecha"].dt.date >= rango[0]) & (vista["fecha"].dt.date <= rango[1])]
+            vista = vista[(vista[col_fecha].dt.date >= rango[0]) & (vista[col_fecha].dt.date <= rango[1])]
         if tipos_sel:
             vista = vista[vista["tipo"].isin(tipos_sel) | (vista["tipo"] == "")]
 
@@ -404,7 +425,7 @@ with tab_lista:
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total cobrado", f"{vista['importe_num'].sum():,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
         m2.metric("Cobros", len(vista))
-        m3.metric("Cobrado hoy", f"{vista.loc[vista['fecha'].dt.date == hoy, 'importe_num'].sum():,.2f} €"
+        m3.metric("Cobrado hoy", f"{vista.loc[vista[col_fecha].dt.date == hoy, 'importe_num'].sum():,.2f} €"
                   .replace(",", "X").replace(".", ",").replace("X", "."))
         alertas = vista["importe_num"].isna() | (vista["importe_num"] > umbral)
         m4.metric("⚠️ Por revisar", int(alertas.sum()),
@@ -412,6 +433,7 @@ with tab_lista:
 
         tabla = pd.DataFrame({
             "Fecha": vista["fecha"].dt.strftime("%d/%m/%Y %H:%M"),
+            "Fecha del cobro": vista["fecha_cobro"].dt.strftime("%d/%m/%Y").fillna("—"),
             **({"Operador": vista["operador"]} if es_admin else {}),
             "Id Oportunidad": vista["oportunidad"],
             "ID llamada": vista["llamada"],
@@ -453,6 +475,7 @@ with tab_editar:
                 "llamada": reg["llamada"],
                 "importe": reg["importe"],
                 "tipo": reg["tipo"],
+                "fecha_cobro": reg["fecha_cobro"].strftime("%Y-%m-%d") if pd.notna(reg["fecha_cobro"]) else "",
             },
             key="refresh_editar",
         )
@@ -481,6 +504,7 @@ if tab_admin:
             st.dataframe(
                 pd.DataFrame([{
                     "Fecha": reg_del["fecha"].strftime("%d/%m/%Y %H:%M") if pd.notna(reg_del["fecha"]) else "—",
+                    "Fecha del cobro": reg_del["fecha_cobro"].strftime("%d/%m/%Y") if pd.notna(reg_del["fecha_cobro"]) else "—",
                     "Operador": reg_del["operador"],
                     "Id Oportunidad": reg_del["oportunidad"],
                     "ID llamada": reg_del["llamada"],
