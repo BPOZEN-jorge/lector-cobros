@@ -35,6 +35,7 @@ MAX_INTENTOS = 5
 # Opcionales: si la hoja aún no las tiene, la app funciona igual (quedan vacías)
 COLUMNAS_OPCIONALES = {
     "fecha_cobro": "Fecha del cobro",   # Pregunta tipo Fecha del formulario (día en que se cobró)
+    "fecha_registro": "Fecha de registro",  # La escribe el Apps Script: primer registro, no cambia al editar
 }
 
 COLUMNAS = {
@@ -179,11 +180,13 @@ def cargar_cobros() -> pd.DataFrame:
     df = pd.DataFrame(filas)
     df["fecha"] = pd.to_datetime(df["fecha"], dayfirst=True, errors="coerce")
     df["fecha_cobro"] = pd.to_datetime(df["fecha_cobro"], dayfirst=True, errors="coerce").dt.normalize()
-    # Fecha con la que se cuentan los cobros: la del formulario (editable). Si un registro no la tiene
-    # (los anteriores a esa pregunta), se usa el día de la Marca temporal.
-    df["fecha_conteo"] = df["fecha_cobro"].fillna(df["fecha"].dt.normalize())
+    # Fecha de registro FIJA (la guarda el Apps Script y no cambia al editar el cobro). Si una fila
+    # aún no la tiene (el script no ha corrido), se usa la Marca temporal.
+    df["fecha_registro"] = pd.to_datetime(df["fecha_registro"], dayfirst=True, errors="coerce").fillna(df["fecha"])
+    # Todos los conteos y filtros de fechas van por la fecha de registro.
+    df["fecha_conteo"] = df["fecha_registro"].dt.normalize()
     df["importe_num"] = df["importe"].map(parsear_importe)
-    return df.sort_values(["fecha_conteo", "fecha"], ascending=False).reset_index(drop=True)
+    return df.sort_values(["fecha_registro", "fecha"], ascending=False).reset_index(drop=True)
 
 
 def eliminar_cobro(reg) -> tuple[bool, str]:
@@ -390,7 +393,7 @@ tab_lista, tab_editar, tab_nuevo, *tab_admin = st.tabs(pestanas)
 def etiqueta(i):
     r = df.loc[i]
     imp = f"{r['importe_num']:.2f} €" if pd.notna(r["importe_num"]) else "sin importe"
-    fecha = r["fecha_conteo"].strftime("cobro %d/%m/%Y") if pd.notna(r["fecha_conteo"]) else "—"
+    fecha = r["fecha_conteo"].strftime("registro %d/%m/%Y") if pd.notna(r["fecha_conteo"]) else "—"
     pref = f"{r['operador']} · " if es_admin else ""
     return f"{pref}{r['oportunidad'] or 'sin oportunidad'} · {imp} · {r['tipo'] or 'sin tipo'} · {fecha}"
 
@@ -401,14 +404,14 @@ with tab_lista:
     if df.empty:
         st.info("Aún no tienes cobros registrados.")
     else:
-        st.caption("Los cobros se cuentan por la **fecha del cobro** que se registra en el formulario. "
-                   "Si un registro no la tiene, se usa su fecha de registro.")
+        st.caption("Los cobros se cuentan por la **fecha de registro**: el día en que el cobro se registró "
+                   "por primera vez. Editar un cobro no cambia esa fecha.")
         c1, c2 = st.columns(2)
         fechas_validas = df["fecha_conteo"].dropna()
         if fechas_validas.empty:
             fechas_validas = pd.Series([pd.Timestamp(ahora_col().date())])
         f_min, f_max = fechas_validas.min().date(), fechas_validas.max().date()
-        rango = c1.date_input("Rango de fechas del cobro", (f_min, f_max), min_value=f_min, max_value=f_max)
+        rango = c1.date_input("Rango de fechas de registro", (f_min, f_max), min_value=f_min, max_value=f_max)
         tipos = sorted(t for t in df["tipo"].unique() if t)
         tipos_sel = c2.multiselect("Tipo de deuda", tipos, default=tipos)
 
@@ -429,15 +432,17 @@ with tab_lista:
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Total cobrado", euros(vista["importe_num"].sum()), help="En el rango de fechas elegido.")
         m2.metric("Cobros", len(vista), help="En el rango de fechas elegido.")
-        m3.metric("Cobrado hoy", euros(base_tipos.loc[es_hoy, "importe_num"].sum()), help=f"{int(es_hoy.sum())} cobros")
-        m4.metric("Cobrado este mes", euros(base_tipos.loc[es_mes, "importe_num"].sum()), help=f"{int(es_mes.sum())} cobros")
+        m3.metric("Registrado hoy", euros(base_tipos.loc[es_hoy, "importe_num"].sum()), help=f"{int(es_hoy.sum())} cobros")
+        m4.metric("Registrado este mes", euros(base_tipos.loc[es_mes, "importe_num"].sum()), help=f"{int(es_mes.sum())} cobros")
         alertas = vista["importe_num"].isna() | (vista["importe_num"] > umbral)
         m5.metric("⚠️ Por revisar", int(alertas.sum()),
                   help=f"Sin importe válido o importe mayor a {umbral:,.0f} €")
 
         tabla = pd.DataFrame({
-            "Fecha del cobro": vista["fecha_conteo"].dt.strftime("%d/%m/%Y"),
-            "Fecha de registro": vista["fecha"].dt.strftime("%d/%m/%Y %H:%M"),
+            "Fecha de registro": vista["fecha_registro"].dt.strftime("%d/%m/%Y %H:%M"),
+            "Fecha del cobro": vista["fecha_cobro"].dt.strftime("%d/%m/%Y").fillna("—"),
+            "Última edición": vista["fecha"].dt.strftime("%d/%m/%Y %H:%M")
+                .where(vista["fecha"] != vista["fecha_registro"], "—"),
             **({"Operador": vista["operador"]} if es_admin else {}),
             "Id Oportunidad": vista["oportunidad"],
             "ID llamada": vista["llamada"],
@@ -507,7 +512,7 @@ if tab_admin:
             reg_del = df.loc[sel_del]
             st.dataframe(
                 pd.DataFrame([{
-                    "Fecha": reg_del["fecha"].strftime("%d/%m/%Y %H:%M") if pd.notna(reg_del["fecha"]) else "—",
+                    "Fecha de registro": reg_del["fecha_registro"].strftime("%d/%m/%Y %H:%M") if pd.notna(reg_del["fecha_registro"]) else "—",
                     "Fecha del cobro": reg_del["fecha_cobro"].strftime("%d/%m/%Y") if pd.notna(reg_del["fecha_cobro"]) else "—",
                     "Operador": reg_del["operador"],
                     "Id Oportunidad": reg_del["oportunidad"],
