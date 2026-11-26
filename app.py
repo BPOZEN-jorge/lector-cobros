@@ -151,7 +151,7 @@ def cargar_cobros() -> pd.DataFrame:
 
     valores = data.get("valores", [])
     if len(valores) < 2:
-        return pd.DataFrame(columns=list(COLUMNAS) + list(COLUMNAS_OPCIONALES) + ["fila", "importe_num"])
+        return pd.DataFrame(columns=list(COLUMNAS) + list(COLUMNAS_OPCIONALES) + ["fila", "importe_num", "fecha_conteo"])
 
     encabezados = [normalizar(h) for h in valores[0]]
     idx = {}
@@ -175,12 +175,15 @@ def cargar_cobros() -> pd.DataFrame:
         filas.append(reg)
 
     if not filas:
-        return pd.DataFrame(columns=list(COLUMNAS) + list(COLUMNAS_OPCIONALES) + ["fila", "importe_num"])
+        return pd.DataFrame(columns=list(COLUMNAS) + list(COLUMNAS_OPCIONALES) + ["fila", "importe_num", "fecha_conteo"])
     df = pd.DataFrame(filas)
     df["fecha"] = pd.to_datetime(df["fecha"], dayfirst=True, errors="coerce")
     df["fecha_cobro"] = pd.to_datetime(df["fecha_cobro"], dayfirst=True, errors="coerce").dt.normalize()
+    # Fecha con la que se cuentan los cobros: la del formulario (editable). Si un registro no la tiene
+    # (los anteriores a esa pregunta), se usa el día de la Marca temporal.
+    df["fecha_conteo"] = df["fecha_cobro"].fillna(df["fecha"].dt.normalize())
     df["importe_num"] = df["importe"].map(parsear_importe)
-    return df.sort_values("fecha", ascending=False).reset_index(drop=True)
+    return df.sort_values(["fecha_conteo", "fecha"], ascending=False).reset_index(drop=True)
 
 
 def eliminar_cobro(reg) -> tuple[bool, str]:
@@ -387,7 +390,7 @@ tab_lista, tab_editar, tab_nuevo, *tab_admin = st.tabs(pestanas)
 def etiqueta(i):
     r = df.loc[i]
     imp = f"{r['importe_num']:.2f} €" if pd.notna(r["importe_num"]) else "sin importe"
-    fecha = r["fecha"].strftime("%d/%m %H:%M") if pd.notna(r["fecha"]) else "—"
+    fecha = r["fecha_conteo"].strftime("cobro %d/%m/%Y") if pd.notna(r["fecha_conteo"]) else "—"
     pref = f"{r['operador']} · " if es_admin else ""
     return f"{pref}{r['oportunidad'] or 'sin oportunidad'} · {imp} · {r['tipo'] or 'sin tipo'} · {fecha}"
 
@@ -398,42 +401,43 @@ with tab_lista:
     if df.empty:
         st.info("Aún no tienes cobros registrados.")
     else:
-        hay_fecha_cobro = df["fecha_cobro"].notna().any()
-        col_fecha = "fecha"
-        if hay_fecha_cobro:
-            filtrar_por = st.radio("Filtrar por:", ["Fecha de registro", "Fecha del cobro"], horizontal=True,
-                                   help="Fecha de registro = Marca temporal del formulario. "
-                                        "Fecha del cobro = el día que se cobró (los registros sin esa fecha no se muestran).")
-            col_fecha = "fecha_cobro" if filtrar_por == "Fecha del cobro" else "fecha"
+        st.caption("Los cobros se cuentan por la **fecha del cobro** que se registra en el formulario. "
+                   "Si un registro no la tiene, se usa su fecha de registro.")
         c1, c2 = st.columns(2)
-        fechas_validas = df[col_fecha].dropna()
+        fechas_validas = df["fecha_conteo"].dropna()
         if fechas_validas.empty:
             fechas_validas = pd.Series([pd.Timestamp(ahora_col().date())])
         f_min, f_max = fechas_validas.min().date(), fechas_validas.max().date()
-        rango = c1.date_input("Rango de fechas", (f_min, f_max), min_value=f_min, max_value=f_max,
-                              key=f"rango_{col_fecha}")
+        rango = c1.date_input("Rango de fechas del cobro", (f_min, f_max), min_value=f_min, max_value=f_max)
         tipos = sorted(t for t in df["tipo"].unique() if t)
         tipos_sel = c2.multiselect("Tipo de deuda", tipos, default=tipos)
 
-        vista = df.copy()
-        if isinstance(rango, tuple) and len(rango) == 2:
-            vista = vista[(vista[col_fecha].dt.date >= rango[0]) & (vista[col_fecha].dt.date <= rango[1])]
+        base_tipos = df.copy()
         if tipos_sel:
-            vista = vista[vista["tipo"].isin(tipos_sel) | (vista["tipo"] == "")]
+            base_tipos = base_tipos[base_tipos["tipo"].isin(tipos_sel) | (base_tipos["tipo"] == "")]
+        vista = base_tipos
+        if isinstance(rango, tuple) and len(rango) == 2:
+            vista = vista[(vista["fecha_conteo"].dt.date >= rango[0]) & (vista["fecha_conteo"].dt.date <= rango[1])]
+
+        def euros(valor):
+            return f"{valor:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
 
         hoy = ahora_col().date()
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total cobrado", f"{vista['importe_num'].sum():,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
-        m2.metric("Cobros", len(vista))
-        m3.metric("Cobrado hoy", f"{vista.loc[vista[col_fecha].dt.date == hoy, 'importe_num'].sum():,.2f} €"
-                  .replace(",", "X").replace(".", ",").replace("X", "."))
+        dia_conteo = base_tipos["fecha_conteo"].dt.date
+        es_hoy = dia_conteo == hoy
+        es_mes = base_tipos["fecha_conteo"].dt.to_period("M") == pd.Period(hoy, "M")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Total cobrado", euros(vista["importe_num"].sum()), help="En el rango de fechas elegido.")
+        m2.metric("Cobros", len(vista), help="En el rango de fechas elegido.")
+        m3.metric("Cobrado hoy", euros(base_tipos.loc[es_hoy, "importe_num"].sum()), help=f"{int(es_hoy.sum())} cobros")
+        m4.metric("Cobrado este mes", euros(base_tipos.loc[es_mes, "importe_num"].sum()), help=f"{int(es_mes.sum())} cobros")
         alertas = vista["importe_num"].isna() | (vista["importe_num"] > umbral)
-        m4.metric("⚠️ Por revisar", int(alertas.sum()),
+        m5.metric("⚠️ Por revisar", int(alertas.sum()),
                   help=f"Sin importe válido o importe mayor a {umbral:,.0f} €")
 
         tabla = pd.DataFrame({
-            "Fecha": vista["fecha"].dt.strftime("%d/%m/%Y %H:%M"),
-            "Fecha del cobro": vista["fecha_cobro"].dt.strftime("%d/%m/%Y").fillna("—"),
+            "Fecha del cobro": vista["fecha_conteo"].dt.strftime("%d/%m/%Y"),
+            "Fecha de registro": vista["fecha"].dt.strftime("%d/%m/%Y %H:%M"),
             **({"Operador": vista["operador"]} if es_admin else {}),
             "Id Oportunidad": vista["oportunidad"],
             "ID llamada": vista["llamada"],
